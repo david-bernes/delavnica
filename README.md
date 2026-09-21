@@ -332,13 +332,13 @@ source .venv/bin/activate
 python -m pytest -q                       # 77 contract/live tests (fast, deterministic)
 python -m pytest -m live -q               # 3 real-checkpoint HTTP tests (needs weights)
 YOLO_TEST_IMAGE=/path/to/photo.jpg python -m pytest -m live -q -s   # + positive-detection check
-python -m pytest tests/test_browser.py -v # 13 real-browser tests (Playwright, headless Chromium)
+python -m pytest tests/test_browser.py -v # 15 real-browser tests (Playwright, headless Chromium)
 python -m ruff check backend tests        # linter
 python -m compileall backend tests        # syntax gate
 python -m pip check                       # dependency consistency
 ```
 
-Verified on 2026-09-21: **89 passed, 1 skipped** (77 contract/live + 13 browser; the skip is
+Verified on 2026-09-21: **91 passed, 1 skipped** (77 contract/live + 15 browser; the skip is
 the live positive-detection check, which needs `YOLO_TEST_IMAGE`), `ruff` clean,
 `pip check` clean.
 
@@ -358,8 +358,11 @@ the live positive-detection check, which needs `YOLO_TEST_IMAGE`), `ruff` clean,
   `getBoundingClientRect()` geometry checks (image vs canvas vs frame), viewport resizing,
   narrow viewport, zero-detection state, multi-detection labels/timing, unsupported and
   oversized file rejection (previous annotations cleared, rejected file never submitted,
-  loading indicator cleared), request cancellation + stale-response discard (delayed response
-  can never annotate a newer image), recovery after rejection, and repeated interactions.
+  loading indicator cleared), rejection while a detection is still in flight (F-003:
+  pending request cancelled, loading cleared, no stale results, recovery — for both
+  unsupported and oversized files), request cancellation + stale-response discard
+  (delayed response can never annotate a newer image), recovery after rejection, and
+  repeated interactions.
   Setup once: `python -m pip install -r requirements-dev.txt` and
   `python -m playwright install --with-deps chromium`. The suite reuses a running service on
   `127.0.0.1:8000` (or starts one) and skips end-to-end detection tests when the official

@@ -241,17 +241,23 @@ def images(app_url):
             fh.truncate(9 * 1024 * 1024)  # 9 MiB > 8 MiB client limit
 
     bus_json = None
-    try:
-        with open(bus, "rb") as fh:
-            res = httpx.post(
-                APP_URL + "/detect",
-                files={"file": ("bus.jpg", fh, "image/jpeg")},
-                timeout=120,
-            )
-        if res.status_code == 200:
+    portrait_json = None
+    for name, path in (("bus.jpg", bus), ("portrait.jpg", portrait)):
+        try:
+            with open(path, "rb") as fh:
+                res = httpx.post(
+                    APP_URL + "/detect",
+                    files={"file": (name, fh, "image/jpeg")},
+                    timeout=120,
+                )
+        except Exception:
+            continue
+        if res.status_code != 200:
+            continue
+        if name == "bus.jpg":
             bus_json = res.json()
-    except Exception:
-        bus_json = None
+        else:
+            portrait_json = res.json()
 
     return {
         "dir": ARTIFACTS_DIR,
@@ -264,6 +270,7 @@ def images(app_url):
         "oversized": oversized,
         "bus_size": bus_size,
         "bus_json": bus_json,
+        "portrait_json": portrait_json,
     }
 
 
@@ -611,6 +618,102 @@ async def test_11_recovery_after_rejection(page, images):
     assert await page.ink() > 0
     assert (await page.page.evaluate("window.__reloadSentinel")) == 1, "page was reloaded"
     await page.screenshot("test11_recovery_after_rejection.png")
+    assert_page_clean(page)
+
+
+@pytest.mark.parametrize(
+    ("rejected_key", "error_fragment"),
+    [("unsupported", "JPEG or PNG"), ("oversized", "8 MiB")],
+)
+async def test_13_f003_rejected_file_while_request_pending(
+    page, images, rejected_key, error_fragment
+):
+    """F-003 regression: a file rejected while a detection is in flight.
+
+    The pre-fix implementation left the loading indicator stuck (the aborted
+    request's seq-guarded ``finally`` never ran) and kept the rejected file
+    in the input. The pending response is held back with Playwright route
+    interception; it must be cancelled (or, if delivered late, discarded by
+    the seq guard) and must never annotate the new state.
+    """
+    require_model(images)
+    stale = images["portrait_json"]
+    assert stale is not None, "portrait /detect fixture unavailable"
+
+    state = {"n": 0, "fulfilled": False}
+
+    async def handle(route):
+        state["n"] += 1
+        if state["n"] == 2:  # the portrait request: hold it back
+            await asyncio.sleep(2.0)
+            try:
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(stale),
+                )
+                state["fulfilled"] = True
+            except Exception:
+                pass  # aborted while pending
+        else:
+            await route.continue_()
+
+    await page.page.route("**/detect", handle)
+
+    # 1. Previous image fully detected: real annotations on screen.
+    await page.upload(images["bus"])
+    await page.wait_done()
+    assert await page.ink() > 0
+
+    # 2. The next detection (portrait) stays pending behind the route.
+    await page.upload(images["portrait"])
+    await page.page.wait_for_event(
+        "request", predicate=lambda r: r.url.rsplit("/", 1)[-1] == "detect"
+    )
+    await page.page.wait_for_timeout(150)  # let the new preview settle
+    assert not await page.hidden("loading"), (
+        "loading indicator should be visible while the request is pending"
+    )
+    assert await page.ink() == 0, "old annotations must clear when the image changes"
+    requests_before_reject = len(page.events["detect_requests"])
+
+    # 3. Select a rejected file while the request is still pending (F-003).
+    await page.upload(images[rejected_key])
+    await page.page.wait_for_selector("#error:not(.hidden)")
+    assert error_fragment in await page.text("#error")
+    assert await page.hidden("loading"), "F-003: loading indicator stuck after rejection"
+    assert await page.hidden("results")
+    assert await page.ink() == 0
+    assert await page.page.evaluate("document.getElementById('file').value") == ""
+    assert await page.page.evaluate("document.getElementById('detect').disabled") is False
+    assert len(page.events["detect_requests"]) == requests_before_reject
+
+    # The Detect button must not submit the rejected file.
+    await page.page.click("#detect")
+    await page.page.wait_for_timeout(300)
+    assert len(page.events["detect_requests"]) == requests_before_reject, (
+        "Detect submitted the rejected file"
+    )
+
+    # 4. Let the held response complete or be aborted.
+    await page.page.wait_for_timeout(2300)
+    aborted = any(
+        "abort" in (failure or "").lower()
+        for _, failure in page.events["failed_requests"]
+    ) or not state["fulfilled"]
+    assert aborted, "the pending request was not cancelled by the rejection"
+    assert await page.page.evaluate("lastResult") is None, "stale result was stored"
+    assert await page.ink() == 0, "stale annotations appeared"
+    assert await page.hidden("results")
+    assert await page.hidden("loading")
+    await page.screenshot(f"test13_f003_rejected_{rejected_key}.png")
+
+    # 5. Recovery: a new valid image detects successfully.
+    await page.upload(images["bus"])
+    await page.wait_done()
+    assert len(await page.chips()) >= 2
+    assert await page.ink() > 0
+    assert await page.hidden("error")
     assert_page_clean(page)
 
 

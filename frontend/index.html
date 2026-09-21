@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>delavnica — CPU-only YOLO object detection</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>delavnica</h1>
+      <span class="subtitle">CPU-only YOLO object detection</span>
+    </div>
+    <div id="status" class="status" role="status" aria-live="polite">Checking service…</div>
+  </header>
+
+  <main>
+    <section class="controls" aria-label="Image selection">
+      <input type="file" id="file" accept="image/jpeg,image/png" aria-label="Select a JPEG or PNG image">
+      <button id="detect" type="button" disabled>Detect objects</button>
+      <span id="loading" class="loading hidden" role="status">Detecting…</span>
+    </section>
+
+    <section id="stage" class="stage" aria-label="Image and detections">
+      <div id="empty" class="empty">Select a JPEG or PNG image to start. Detections are drawn over the image.</div>
+      <img id="preview" alt="Uploaded image" class="hidden">
+      <canvas id="overlay" class="hidden" aria-label="Detection overlay"></canvas>
+    </section>
+
+    <section id="results" class="results hidden" aria-label="Detection results">
+      <div id="count" class="count"></div>
+      <ul id="classes" class="chips"></ul>
+      <div id="timing" class="timing"></div>
+    </section>
+
+    <div id="error" class="error hidden" role="alert"></div>
+  </main>
+
+  <footer class="foot">
+    <span>Backend: FastAPI/Uvicorn · Ultralytics YOLO on CPU · <a href="/docs">API docs</a> · <a href="/health">/health</a></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

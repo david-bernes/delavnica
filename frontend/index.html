@@ -24,8 +24,10 @@
 
     <section id="stage" class="stage" aria-label="Image and detections">
       <div id="empty" class="empty">Select a JPEG or PNG image to start. Detections are drawn over the image.</div>
-      <img id="preview" alt="Uploaded image" class="hidden">
-      <canvas id="overlay" class="hidden" aria-label="Detection overlay"></canvas>
+      <div id="frame" class="frame hidden">
+        <img id="preview" alt="Uploaded image">
+        <canvas id="overlay" aria-label="Detection overlay"></canvas>
+      </div>
     </section>
 
     <section id="results" class="results hidden" aria-label="Detection results">

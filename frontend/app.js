@@ -22,6 +22,7 @@ const els = {
   loading: document.getElementById("loading"),
   stage: document.getElementById("stage"),
   empty: document.getElementById("empty"),
+  frame: document.getElementById("frame"),
   preview: document.getElementById("preview"),
   overlay: document.getElementById("overlay"),
   results: document.getElementById("results"),
@@ -104,7 +105,7 @@ function showError(message) {
 
 function showPreview(file) {
   els.empty.classList.add("hidden");
-  els.preview.classList.remove("hidden");
+  els.frame.classList.remove("hidden");
   const previous = els.preview.src;
   const url = URL.createObjectURL(file);
   els.preview.onload = () => {
@@ -179,10 +180,11 @@ async function runDetection() {
 
 function layoutOverlay() {
   // Size the canvas backing store to the displayed image, scaled for the
-  // device pixel ratio. The canvas is centered in the stage exactly like
-  // the image, so CSS size == displayed image size (no letterbox offsets).
+  // device pixel ratio. The canvas CSS box is pinned to the frame
+  // (inset: 0), so its displayed size always equals the image size;
+  // only the backing store is managed here.
   const preview = els.preview;
-  if (!lastResult || preview.classList.contains("hidden")) return;
+  if (!lastResult || els.frame.classList.contains("hidden")) return;
   const dpr = window.devicePixelRatio || 1;
   const cssW = preview.clientWidth;
   const cssH = preview.clientHeight;
@@ -190,14 +192,11 @@ function layoutOverlay() {
   const canvas = els.overlay;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
-  canvas.style.width = cssW + "px";
-  canvas.style.height = cssH + "px";
   drawOverlay(lastResult.detections, lastResult.image);
 }
 
 function drawOverlay(detections, apiImage) {
   const canvas = els.overlay;
-  if (canvas.classList.contains("hidden")) canvas.classList.remove("hidden");
   const dpr = window.devicePixelRatio || 1;
   const cssW = els.preview.clientWidth;
   const cssH = els.preview.clientHeight;
@@ -205,8 +204,6 @@ function drawOverlay(detections, apiImage) {
   if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
-    canvas.style.width = cssW + "px";
-    canvas.style.height = cssH + "px";
   }
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -252,12 +249,12 @@ function drawOverlay(detections, apiImage) {
 }
 
 function clearOverlay() {
-  const ctx = els.overlay.getContext("2d");
+  const canvas = els.overlay;
+  const ctx = canvas.getContext("2d");
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.restore();
-  els.overlay.classList.add("hidden");
 }
 
 // ---------------------------------------------------------------- results
@@ -285,6 +282,12 @@ function showResults(data) {
 els.file.addEventListener("change", () => {
   const file = els.file.files && els.file.files[0];
   if (!file) return;
+  // F-002: invalidate the previous image's annotations and abort any
+  // in-flight request BEFORE validation can return, so selecting an
+  // invalid or oversized file can never leave the previous image's
+  // detections visible (and a stale response can never land on the
+  // newly selected image).
+  invalidateCurrent();
   if (!/^image\/(jpeg|png)$/.test(file.type)) {
     showError("Please choose a JPEG or PNG image file.");
     return;
@@ -293,13 +296,12 @@ els.file.addEventListener("change", () => {
     showError("The selected file is larger than the 8 MiB upload limit.");
     return;
   }
-  invalidateCurrent(); // never annotate image A over image B
   showPreview(file);
   runDetection();
 });
 
 els.detect.addEventListener("click", () => {
-  if (els.preview.classList.contains("hidden")) return;
+  if (els.frame.classList.contains("hidden")) return;
   runDetection();
 });
 

@@ -224,3 +224,6 @@ __marimo__/
 *.engine
 # Ultralytics inference run artifacts
 runs/
+
+# Browser test artifacts (Playwright screenshots, generated fixtures, server log)
+artifacts/

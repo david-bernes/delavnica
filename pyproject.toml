@@ -3,6 +3,7 @@ testpaths = ["tests"]
 markers = [
     "live: real pretrained-model integration tests (require downloaded official weights; run with -m live)",
 ]
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

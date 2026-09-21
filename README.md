@@ -16,7 +16,7 @@
 |---|---|
 | Runtime + CPU model proof (venv, `yolo26n.pt`, CPU inference) | **Implemented & verified** (WO-001) |
 | Backend HTTP contract (`/health`, `/detect`, validation, controlled errors) | **Implemented & verified** (WO-001) |
-| Browser image upload with aligned boxes/labels/timing | **Implemented & verified** (WO-001) |
+| Browser image upload with aligned boxes/labels/timing | **Implemented & browser-verified** (WO-001; Playwright evidence in WO-001V) |
 | Browser webcam Start/Stop with backpressure | **Not implemented** (future work order) |
 | Demo operability (one-command start, runbook, timings, recovery) | **Implemented** (WO-001, see [`docs/demo-runbook.md`](docs/demo-runbook.md)) |
 | Video-file input, LAN access, profiling/exports | **Deferred** (future work orders) |
@@ -25,6 +25,7 @@
 
 Verified on 2026-09-21 on: Ubuntu 26.04.1 (WSL2, kernel 6.18.33), AMD Ryzen AI 7 350
 (8 cores / 16 threads), 15 GiB RAM, CPython 3.14.4, ultralytics 8.4.157, torch 2.14.0+cpu.
+Browser verification: Playwright 1.63.0 with headless Chromium 153.0.8010.12.
 
 ## What is this project?
 
@@ -328,15 +329,18 @@ not marketing benchmarks. Practical next-step tuning (only under a separate work
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q                       # 64 mocked tests (fast, offline, deterministic)
+python -m pytest -q                       # 77 contract/live tests (fast, deterministic)
 python -m pytest -m live -q               # 3 real-checkpoint HTTP tests (needs weights)
 YOLO_TEST_IMAGE=/path/to/photo.jpg python -m pytest -m live -q -s   # + positive-detection check
+python -m pytest tests/test_browser.py -v # 13 real-browser tests (Playwright, headless Chromium)
 python -m ruff check backend tests        # linter
 python -m compileall backend tests        # syntax gate
 python -m pip check                       # dependency consistency
 ```
 
-Verified on 2026-09-21: **67 passed** (64 mocked + 3 live), `ruff` clean, `pip check` clean.
+Verified on 2026-09-21: **89 passed, 1 skipped** (77 contract/live + 13 browser; the skip is
+the live positive-detection check, which needs `YOLO_TEST_IMAGE`), `ruff` clean,
+`pip check` clean.
 
 - **Mocked tests** prove the HTTP contract: readiness semantics (ready **and** not-ready),
   JSON structure, exact coordinate/class mapping, zero-detection success, all error paths
@@ -349,8 +353,19 @@ Verified on 2026-09-21: **67 passed** (64 mocked + 3 live), `ruff` clean, `pip c
 - A mocked detector is **not** proof that the real model works, and a Python inference call is
   **not** proof that the HTTP service works — both layers are tested separately, and the live
   curl session in the agent report covers the uninstrumented HTTP path as well.
-- No private or unlicensed photographs are committed; the demo works with any user-selected
-  local image.
+- **Browser tests** (`tests/test_browser.py`) drive the real application over HTTP with a real
+  headless Chromium via Playwright: landscape/portrait upload with
+  `getBoundingClientRect()` geometry checks (image vs canvas vs frame), viewport resizing,
+  narrow viewport, zero-detection state, multi-detection labels/timing, unsupported and
+  oversized file rejection (previous annotations cleared, rejected file never submitted,
+  loading indicator cleared), request cancellation + stale-response discard (delayed response
+  can never annotate a newer image), recovery after rejection, and repeated interactions.
+  Setup once: `python -m pip install -r requirements-dev.txt` and
+  `python -m playwright install --with-deps chromium`. The suite reuses a running service on
+  `127.0.0.1:8000` (or starts one) and skips end-to-end detection tests when the official
+  weights are not present. Screenshots land in `artifacts/browser/` (git-ignored) and are not
+  committed. No private or unlicensed photographs are committed; the demo works with any
+  user-selected local image.
 
 ## Known limitations
 

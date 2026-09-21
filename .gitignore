@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# delavnica
+# Model weights are runtime dependencies, never committed (INV / WO-001).
+*.pt
+*.onnx
+*.engine
+# Ultralytics inference run artifacts
+runs/
+
+# Browser test artifacts (Playwright screenshots, generated fixtures, server log)
+artifacts/

@@ -14,30 +14,30 @@
 
 | Item | Status |
 |---|---|
-| Repository state | **Greenfield** — project governance and documentation only; no application code yet |
-| Application code | Not implemented (delivered by upcoming P0 work orders) |
+| Runtime + CPU model proof (venv, `yolo26n.pt`, CPU inference) | **Implemented & verified** (WO-001) |
+| Backend HTTP contract (`/health`, `/detect`, validation, controlled errors) | **Implemented & verified** (WO-001) |
+| Browser image upload with aligned boxes/labels/timing | **Implemented & browser-verified** (WO-001; Playwright evidence in WO-001V) |
+| Browser webcam Start/Stop with backpressure | **Not implemented** (future work order) |
+| Demo operability (one-command start, runbook, timings, recovery) | **Implemented** (WO-001, see [`docs/demo-runbook.md`](docs/demo-runbook.md)) |
+| Video-file input, LAN access, profiling/exports | **Deferred** (future work orders) |
 | First live demo | Targeted **2026-09-22** |
 | Deliverable class | **Demo / prototype** — explicitly *not* a hardened public production service |
 
-This README documents the project's purpose, the agreed architecture, the stable API contract the
-implementation must satisfy, and the project's non-negotiable constraints. Anything marked
-*planned* is a design commitment from the project constitution ([`AGENTS.md`](AGENTS.md)) — **not**
-verified functionality. When the P0 implementation lands, the planned sections are replaced with
-**actual tested** commands and measured numbers.
+Verified on 2026-09-21 on: Ubuntu 26.04.1 (WSL2, kernel 6.18.33), AMD Ryzen AI 7 350
+(8 cores / 16 threads), 15 GiB RAM, CPython 3.14.4, ultralytics 8.4.157, torch 2.14.0+cpu.
+Browser verification: Playwright 1.63.0 with headless Chromium 153.0.8010.12.
 
 ## What is this project?
 
 A single, small, locally hosted inference service that demonstrates general-purpose object
 detection without any GPU:
 
-- A **pretrained COCO object detector** from the official `ultralytics` framework (initial
-  candidate: `yolo26n.pt`, nano size — confirmed against the installed package version at
-  implementation time, never assumed).
-- A **FastAPI/Uvicorn** HTTP service that loads the model **once at startup** and never per
-  request.
-- A **plain HTML5/JS browser page** for interactive demos: upload a still image or take webcam
-  snapshots, with annotated boxes, labels, confidence percentages and measured timing drawn as
-  overlays.
+- A **pretrained COCO object detector** from the official `ultralytics` framework
+  (`yolo26n.pt`, nano — confirmed loadable and runnable on the installed package, never assumed).
+- A **FastAPI/Uvicorn** HTTP service that loads the model **once at startup** (plus one warm-up
+  inference) and never per request.
+- A **plain HTML5/JS browser page**: upload a still JPEG/PNG and see annotated boxes, labels,
+  confidence percentages and measured server timing drawn over the image.
 - A **stable JSON API** so any other client (curl, Python, future machine-vision tooling) can
   consume the same detections.
 
@@ -47,23 +47,24 @@ explicit `device="cpu"` inference, no CUDA dependencies, no automatic device sel
 ### Explicit non-goals (first demo)
 
 Custom datasets, training or fine-tuning; segmentation / pose / tracking / face recognition;
-video transcoding or video storage; user accounts or authentication; cloud hosting; production
-hardening; WebSockets / RTSP / message brokers / databases.
+**webcam capture and video-file input (deferred, not yet implemented)**; video transcoding or
+storage; user accounts or authentication; cloud hosting; production hardening; WebSockets / RTSP /
+message brokers / databases; GPU acceleration of any kind.
 
 ## Architecture
 
 ```text
 Browser (HTML5/CSS/JavaScript)
-  |  image file, webcam snapshot (future: sampled local video frame)
-  |  POST /detect  multipart/form-data, field: file
+  |  image file  ->  POST /detect  multipart/form-data, field: file
   v
-FastAPI / Uvicorn (Ubuntu WSL2 or native Linux)
-  |  bounded upload size, type and decode validation
-  |  EXIF-aware orientation + RGB conversion
-  |  bounded inference concurrency
+FastAPI / Uvicorn (Ubuntu WSL2 or native Linux, single worker)
+  |  bounded upload size (8 MiB streaming limit), type and decode validation (24 MP limit)
+  |  EXIF-aware orientation + RGB conversion (Pillow)
+  |  bounded inference concurrency (semaphore, default 1; excess -> 429)
+  |  inference runs in a worker thread (event loop never blocked)
   v
 Ultralytics YOLO pretrained COCO detector
-  |  device="cpu"; configured image size / confidence threshold
+  |  device="cpu" (explicit, every prediction path); imgsz=640; conf=0.25
   v
 CPU inference and Ultralytics result decoding
   |  original-image pixel boxes, classes, confidences, durations
@@ -75,110 +76,157 @@ GET /       -> static browser demo
 GET /docs   -> FastAPI-generated interactive API documentation
 ```
 
-**Repository layout (target shape)** — created by the implementation work orders as needed:
+**Repository layout:**
 
 ```text
 .
 ├── AGENTS.md                  # Project constitution (repository law for agents)
 ├── README.md                  # This file
-├── .gitignore                 # Environments, caches, secrets, generated weights
-├── .env.example               # Safe documented defaults; no secrets
-├── requirements.txt           # Tested, reproducible dependencies
+├── .env.example               # Safe documented configuration defaults
+├── requirements.txt           # Tested runtime dependencies (CPU torch pins)
+├── requirements-dev.txt       # Dev/test tooling (pytest, httpx, ruff)
+├── pyproject.toml             # pytest markers + ruff config only
 ├── backend/
 │   ├── main.py                # App factory/startup, routes, static files
-│   ├── config.py              # Validated environment settings
-│   ├── inference.py           # Ultralytics model lifetime, CPU prediction
+│   ├── config.py              # Validated environment settings (rejects non-CPU)
+│   ├── inference.py           # Model lifetime, warm-up, CPU prediction, semaphore
 │   ├── schemas.py             # Stable API response contracts
-│   └── image_io.py            # Upload, decode, orientation, pixel limits
+│   └── image_io.py            # Upload size limits, decode, EXIF, RGB normalization
 ├── frontend/
 │   ├── index.html
 │   ├── app.js
 │   └── styles.css
 ├── tests/
-│   └── …                      # Unit/API tests (mocked) + opt-in live-model CPU test
+│   ├── conftest.py            # Deterministic fake-model fixtures
+│   ├── test_api.py            # HTTP contract tests (mocked detector)
+│   ├── test_image_io.py       # Untrusted-input decoding/limits unit tests
+│   ├── test_inference_contract.py  # Config validation + service contract
+│   └── test_live_model.py     # Real-checkpoint HTTP tests (marker: live)
 └── docs/
-    ├── demo-runbook.md        # Exact live-demonstration steps
+    ├── demo-runbook.md        # Exact live-demonstration steps + recovery table
     └── adr/                   # Approved architecture decisions only
 ```
 
-## Technology stack
+## Getting started (tested commands)
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Runtime | CPython (tested version documented at implementation) | `python3 -m venv .venv`; never system-site-packages installs |
-| Backend | FastAPI + Uvicorn | One long-lived model; single Uvicorn worker initially |
-| Inference | Official `ultralytics` + PyTorch **CPU** execution | `device="cpu"` explicit on every prediction path |
-| Imaging | Pillow (decode, validation, EXIF orientation) | Bounded decode, RGB conversion |
-| Frontend | Plain `index.html` + CSS + vanilla JS | No npm toolchain, no frontend framework |
-| Testing | pytest + FastAPI test client | Deterministic mocked tests + explicitly marked live-model CPU test |
-| Quality | ruff (single configured linter) | No speculative build-system complexity |
-| Prohibited | CUDA, TensorRT, ROCm, DirectML, any GPU path | See invariants below |
+Prerequisites: Ubuntu/WSL2 (or native Linux) with CPython 3.10–3.14 (`python3-venv` installed).
+First run needs Internet once, for the ~5.3 MB checkpoint download.
 
-## HTTP API — baseline contract
+```bash
+git clone https://github.com/david-bernes/delavnica
+cd delavnica
+python3 -m venv .venv
+source .venv/bin/activate
 
-The contract below is the **baseline design** mandated by the constitution. JSON examples are
-**illustrative** (values are examples, not measured output). Breaking changes require explicit
-approval and tests.
+# 1) CPU-only PyTorch FIRST, from the official PyTorch CPU wheel index
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# 2) The rest (pins are satisfied by the +cpu builds from step 1)
+python -m pip install -r requirements.txt
+```
+
+> **Why step 1 separately?** A plain `pip install torch` on Linux pulls the CUDA-enabled wheel
+> (~2 GB + NVIDIA libraries). Step 1 installs `torch==2.14.0+cpu` / `torchvision==0.29.0+cpu`;
+> the pins in `requirements.txt` remain satisfied by those builds (PEP 440 local-version rules),
+> so pip will not swap in CUDA wheels.
+
+Start the service (one command; reads `HOST`/`PORT`/model settings from the environment or `.env`):
+
+```bash
+python -m backend.main
+```
+
+Expected startup (measured ≈ 1 s after import on the reference machine):
+
+```text
+INFO backend.inference: Loading model yolo26n.pt (device=cpu, imgsz=640, conf=0.25)
+INFO backend.inference: Model ready in 1064 ms (torch threads: 8)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+```
+
+- Browser demo: **http://127.0.0.1:8000/**
+- Interactive API docs: **http://127.0.0.1:8000/docs**
+- Stop: `Ctrl+C` (single worker, no state to clean up)
+
+Alternative launch (equivalent): `uvicorn backend.main:app --host 127.0.0.1 --port 8000`.
+
+## HTTP API
+
+`application/json` for detection results and controlled API errors; the browser is served as HTML.
 
 ### `GET /health` — readiness without inference
 
-- `200` when the pretrained model is actually loaded and available.
-- `503` when the model has not loaded (e.g. offline first run) — never fake readiness.
-- Never exposes host paths, environment variables, tokens or network internals.
-
-Illustrative `200` response:
+`200` when the model is actually loaded and warmed up; `503` otherwise (never fake readiness).
+Actual response from the verified run:
 
 ```json
 {
   "status": "ready",
   "model": "yolo26n.pt",
   "device": "cpu",
-  "ultralytics_version": "<installed-version>"
+  "ultralytics_version": "8.4.157",
+  "torch_version": "2.14.0+cpu",
+  "image_size": 640,
+  "confidence": 0.25
 }
 ```
 
 ### `POST /detect` — detect objects in one still image
 
-Input: `multipart/form-data` with a required field **`file`** containing one still image
-(initially JPEG and PNG). Video files are explicitly rejected here. No URL-fetching, no
-filesystem paths, no client-controlled model selection.
+Input: `multipart/form-data`, required field **`file`**, one still image (JPEG or PNG).
+Video files and unsupported formats are explicitly rejected; filename extensions and
+`Content-Type` alone are never trusted — the **decoded** format is validated.
 
-Illustrative `200` response:
+Example:
+
+```bash
+curl -s -F "file=@photo.jpg" http://127.0.0.1:8000/detect | python3 -m json.tool
+```
+
+Actual response (verified, 810×1080 photo, values abridged):
 
 ```json
 {
   "model": "yolo26n.pt",
   "device": "cpu",
-  "image": { "width": 1280, "height": 720 },
+  "image": { "width": 810, "height": 1080 },
   "detections": [
+    {
+      "class_id": 5,
+      "class_name": "bus",
+      "confidence": 0.8832,
+      "box": [0.0, 230.69, 802.36, 750.91]
+    },
     {
       "class_id": 0,
       "class_name": "person",
-      "confidence": 0.927,
-      "box": [101.2, 49.0, 384.6, 699.2]
+      "confidence": 0.8771,
+      "box": [49.17, 397.47, 237.7, 902.6]
     }
   ],
-  "timing_ms": { "total": 123.4, "inference": 101.2 }
+  "timing_ms": { "total": 27.5, "inference": 23.5 }
 }
 ```
 
 **Contract rules**
 
 1. `class_id` is a non-negative integer from the model's label map; `class_name` is its exact
-   corresponding name.
-2. `confidence` is a finite number in `[0.0, 1.0]` (the UI may display it as `92.7%`).
+   corresponding name (never guessed from the ID).
+2. `confidence` is a finite number in `[0.0, 1.0]` (the UI displays it as `87.7%`).
 3. **Coordinate convention:** `box` is `[x1, y1, x2, y2]` in *floating-point pixels of the
    decoded, EXIF-orientation-corrected input image* (i.e. `image.width` × `image.height`),
-   top-left origin, X right, Y down. Internal letterbox/tensor coordinates are **never**
-   returned. The browser scales overlays to displayed size.
+   top-left origin, X right, Y down. Ultralytics letterbox/tensor coordinates are **never**
+   returned; boxes are clamped into the image and degenerate boxes dropped.
 4. An image with nothing detected returns `"detections": []` with HTTP `200` — empty is a valid
    result, not an error.
 5. The response carries boxes and metadata, **not** base64 annotated images; the browser draws
    overlays locally.
-6. Response size is bounded (configured max detections) and strictly JSON-serializable — no
-   NumPy/PyTorch types leak to clients.
-7. `timing_ms.total` is server-side processing duration; `timing_ms.inference` has a documented
-   measurement boundary. Internal `speed` figures are never presented as HTTP round-trip time.
+6. Response size is bounded (`YOLO_MAX_DETECTIONS`, default 100, most-confident first) and
+   strictly JSON-serializable — no NumPy/PyTorch types leak to clients.
+7. `timing_ms.inference` measures the Ultralytics `predict()` call only; `timing_ms.total` is
+   server-side processing (upload read + decode + inference + serialization). HTTP round-trip
+   time is always reported separately, never conflated with these.
 
 ### Controlled errors
 
@@ -188,100 +236,160 @@ Application errors share one shape:
 { "error": { "code": "invalid_image", "message": "The uploaded file is not a supported image." } }
 ```
 
-| Status | Example cause | Effect |
+| Status | Code(s) | Example cause (all verified with curl) |
 |---|---|---|
-| `400` / `422` | Missing/corrupt image, malformed form | No inference, informative message |
-| `413` | Upload or decoded image beyond policy limits | Rejected, never decoded unboundedly |
-| `415` | Unsupported media type/format (extension alone is never trusted) | Rejected |
-| `429` | Bounded inference concurrency exceeded | Retry allowed, optional `Retry-After` |
-| `503` | Model unavailable / not ready | No stale or fabricated detections |
-| `500` | Unexpected internal failure | Sanitized message; no stack traces or paths leak |
+| `400` | `missing_file`, `invalid_image` | No `file` field; text/corrupt/truncated image |
+| `413` | `image_too_large` | Upload > 8 MiB (streaming limit) or decoded > 24 MP |
+| `415` | `unsupported_media_type` | GIF/WEBP/TIFF/BMP/… or video `Content-Type` |
+| `429` | `inference_overloaded` | Concurrency limit (default 1) reached; `Retry-After: 1` |
+| `503` | `model_not_loaded` | Model load failed / service not ready — no fabricated detections |
+| `500` | `internal_error` | Unexpected failure — sanitized message, full detail only in server logs |
 
-**Input limits (initial policy, configurable):** max upload **8 MiB**, max decoded **24 MP**,
-EXIF orientation applied before dimensions/inference, animated/multipage and decompression-bomb
-files rejected, alpha handled deterministically.
+No stack traces, filesystem paths, exception details or image contents ever reach the client.
 
-## Browser demo (planned behavior)
+**Input limits (enforced, configurable):** max compressed upload **8 MiB** (`MAX_UPLOAD_BYTES`),
+max decoded **24 MP** (`MAX_IMAGE_PIXELS`, checked from the image header before decode),
+animated/multi-frame images rejected, decompression-bomb protection, EXIF orientation applied
+before dimensions and inference, alpha deterministically composited over white.
 
-- Upload an image → preview with correct aspect ratio/orientation → live annotated overlay,
-  detection count, labels with percentages, server duration.
-- **Start/Stop Webcam** using `getUserMedia`: compressed JPEG snapshots at a bounded rate,
-  **at most one in-flight `/detect` request per client**, stale responses discarded
-  (sequence-tagged / `AbortController`), frame sampling instead of request pileup.
-- Measured end-to-end frame rate and latency shown with correct labels — dropped frames are not
-  hidden.
-- Visible, recoverable error states for: camera permission denied, camera in use, insecure
-  origin, backend not ready, network failure. **Webcam requires `localhost` or HTTPS** (browser
-  secure-context rule); remote-HTTP clients may use image upload while webcam may not work —
-  that distinction is stated, not papered over.
+## Browser demo (implemented in WO-001)
 
-## Configuration (planned)
+Open http://127.0.0.1:8000/ :
 
-Validated at startup with actionable, secret-safe failures. Design targets from the
-constitution:
+- Service/model readiness indicator (from `/health`, with bounded retry while the model loads).
+- Select a JPEG/PNG → preview with correct aspect ratio and orientation → automatic detection.
+- Annotated overlay (boxes, class labels with percentages), detection count, and server timing
+  (`inference` and `total` ms) — drawn on a canvas that tracks displayed size, window resizing
+  and device pixel ratio.
+- A **Detect objects** button re-runs on the same image; selecting a new image immediately clears
+  old boxes and aborts any in-flight request (stale responses are discarded — annotations from
+  image A can never land on image B).
+- Meaningful, recoverable error messages (bad file type, size limits, service errors, 429
+  auto-retry) without a page refresh.
+- Same-origin relative URLs only; no external CDNs; works offline once dependencies + weights exist.
 
-| Setting | Initial default | Constraint |
+**Not implemented in WO-001 (do not present as available):** webcam capture, video-file input,
+frame sampling/FPS display. These are explicitly deferred to later work orders.
+
+## Configuration
+
+Validated at startup with actionable, secret-safe failures (see `.env.example`):
+
+| Setting | Default | Constraint |
 |---|---|---|
-| `YOLO_MODEL` | `yolo26n.pt` | Approved pretrained choice; never set by HTTP client |
-| `YOLO_DEVICE` | `cpu` | **Any non-CPU value is rejected**, not auto-selected |
-| `YOLO_IMAGE_SIZE` | `640` | Tested valid range |
+| `YOLO_MODEL` | `yolo26n.pt` | Approved pretrained name (resolved into `YOLO_WEIGHTS_DIR`) or absolute local path; never set by HTTP clients |
+| `YOLO_DEVICE` | `cpu` | **Any non-CPU value is rejected at startup** (INV-02) |
+| `YOLO_IMAGE_SIZE` | `640` | Integer 16–1280 |
 | `YOLO_CONFIDENCE` | `0.25` | Number in `[0, 1]` |
-| `YOLO_MAX_DETECTIONS` | `100` | Positive bounded integer |
-| `MAX_UPLOAD_BYTES` | `8388608` (8 MiB) | Bounded upload |
-| `MAX_IMAGE_PIXELS` | `24000000` (24 MP) | Bounded decode |
-| `INFERENCE_CONCURRENCY` | `1` | Raised only with verified thread-safety/perf |
-| `TORCH_NUM_THREADS` | measured/tunable | No CPU oversubscription; recorded |
-| `HOST` | `127.0.0.1` | LAN binding requires explicit human approval |
-| `PORT` | `8000` | Non-privileged, configurable |
+| `YOLO_MAX_DETECTIONS` | `100` | Integer 1–1000 |
+| `MAX_UPLOAD_BYTES` | `8388608` (8 MiB) | Integer ≥ 1 KiB |
+| `MAX_IMAGE_PIXELS` | `24000000` (24 MP) | Integer ≥ 1 |
+| `INFERENCE_CONCURRENCY` | `1` | Integer 1–16; raise only with verified thread-safety/performance |
+| `TORCH_NUM_THREADS` | (unset → PyTorch auto, measured 8) | Integer ≥ 1; avoid oversubscription |
+| `HOST` | `127.0.0.1` | Loopback by default (INV-07); LAN binding requires explicit approval |
+| `PORT` | `8000` | Non-privileged port |
+| `YOLO_WEIGHTS_DIR` | `~/.cache/ultralytics/weights` | Local weights directory for offline demos |
 
 ## CPU-only guarantee
 
-- `device="cpu"` is set explicitly on every Ultralytics prediction path; automatic device
-  selection is never relied upon.
-- No CUDA/TensorRT/ROCm/DirectML dependency or code path exists or may be added; `YOLO_DEVICE`
-  values other than `cpu` are rejected at startup.
-- `/health` reports the runtime device and tests assert it is exactly `cpu`.
-- Compliance is judged by **actual CPU operation**, not by wheel names; the live-model
-  integration test runs a real pretrained checkpoint through the real HTTP endpoint on CPU.
+- `device="cpu"` is set explicitly on **every** Ultralytics prediction path (warm-up included);
+  automatic device selection is never relied upon.
+- No CUDA/TensorRT/ROCm/DirectML dependency or code path exists; the environment installs the
+  `+cpu` PyTorch wheels; `YOLO_DEVICE` values other than `cpu` are rejected at startup.
+- `/health` reports the runtime device; mocked tests assert `device == "cpu"` on every
+  (mocked) prediction call, and the live-model test runs a real checkpoint through the real
+  HTTP endpoint on CPU.
+- Compliance is judged by **actual CPU operation**, not wheel names.
 
-## Security & privacy posture
+## Measured performance (2026-09-21, reference machine)
 
-- **Loopback by default** (`127.0.0.1`). LAN or Internet exposure is a security decision
-  requiring explicit human approval, route/firewall configuration and a real remote-client test.
-- **No image storage**: uploaded bytes exist only for request processing. No debug dumps, no
-  frame caches, no uploads of user images to any third-party service. (Model weight download
-  from the official Ultralytics source is a dependency operation, not image exfiltration.)
-- **Untrusted uploads fail closed**: bounded size before decode, real-decode validation,
-  format allowlist, decompression-bomb protection; controlled 4xx/5xx errors, never stack
-  traces, filesystem paths, or image contents in responses/logs.
-- **No secrets** in code, logs, fixtures or commits; no authentication is implemented, so the
-  service is not suitable for unauthenticated public deployment.
-- Development runs in a dedicated, rebuildable WSL2/Linux workspace; host Windows security
-  settings are never weakened to make the demo work.
+| Metric | Value |
+|---|---|
+| CPU | AMD Ryzen AI 7 350 (Zen 5, 8 cores / 16 threads), WSL2 on Ubuntu 26.04.1 |
+| RAM | 15 GiB |
+| Python / torch / ultralytics | 3.14.4 / 2.14.0+cpu / 8.4.157 |
+| Checkpoint | `yolo26n.pt` (official Ultralytics asset, 5.3 MB) |
+| Image | 810×1080 JPEG, `imgsz=640`, `conf=0.25`, torch threads = 8 (auto) |
+| Warm-up | 1 inference at startup + 1 warm-up request before timing |
+| Samples | 20 timed HTTP requests |
 
-## Performance policy
+| Measurement (server-side) | mean | median | p95 | min–max |
+|---|---|---|---|---|
+| Inference (`predict()` only) | 22.5 ms | 22.4 ms | 25.8 ms | 18.2–26.6 ms |
+| Total server processing | 26.4 ms | 26.4 ms | 29.6 ms | 22.3–30.7 ms |
+| HTTP round-trip (curl-class client) | 28.3 ms | 28.3 ms | 31.4 ms | 24.0–32.9 ms |
 
-- **~2–5 FPS on the actual CPU is an aspiration, not a guarantee.** Nothing is claimed until
-  measured.
-- Reported metrics always include: CPU model, cores/threads, OS/WSL2, Python and package
-  versions, checkpoint, `imgsz`, confidence, warm-up policy, sample count (≥20 where practical),
-  mean/median/p95 latency, and separate decode/inference/HTTP/browser-FPS boundaries.
-- Model-only inference time is never substituted for end-to-end HTTP or UI throughput.
-- If the real CPU does not reach the aspiration, the honest measured number plus a bounded
-  tuning proposal (nano vs small, `imgsz`, threads, frame sampling) is presented.
+**≈ 35 FPS end-to-end over HTTP** on the reference machine — comfortably above the 2–5 FPS
+aspiration, though that aspiration is a target, not a guarantee: results will be re-measured on
+the actual demo hardware. These numbers measure the thing users experience (HTTP request/response),
+not marketing benchmarks. Practical next-step tuning (only under a separate work order):
+`imgsz` vs accuracy, `TORCH_NUM_THREADS`, nano vs small checkpoint.
 
-## Delivery slices & feature matrix
+## Testing & verification
 
-| Priority | Slice | Status |
-|---|---|---|
-| P0 | Runtime + CPU model proof (venv, pretrained weights, CPU inference) | NOT IMPLEMENTED |
-| P0 | Backend HTTP contract (`/health`, `/detect`, validation, errors) | NOT IMPLEMENTED |
-| P0 | Browser image upload with aligned overlays | NOT IMPLEMENTED |
-| P0 | Browser webcam Start/Stop with backpressure | NOT IMPLEMENTED |
-| P0 | Demo operability (one-command start, runbook, timings, recovery) | NOT IMPLEMENTED |
-| P1 | Video-file input (browser-sampled frames via same API) | DEFERRED — only after P0 passes end-to-end |
-| P1 | LAN access from a second computer | DEFERRED — requires security approval + real test |
-| P2 | Profiling / optional official CPU export | DEFERRED — separate approved work order |
+```bash
+source .venv/bin/activate
+python -m pytest -q                       # 77 contract/live tests (fast, deterministic)
+python -m pytest -m live -q               # 3 real-checkpoint HTTP tests (needs weights)
+YOLO_TEST_IMAGE=/path/to/photo.jpg python -m pytest -m live -q -s   # + positive-detection check
+python -m pytest tests/test_browser.py -v # 15 real-browser tests (Playwright, headless Chromium)
+python -m ruff check backend tests        # linter
+python -m compileall backend tests        # syntax gate
+python -m pip check                       # dependency consistency
+```
+
+Verified on 2026-09-21: **91 passed, 1 skipped** (77 contract/live + 15 browser; the skip is
+the live positive-detection check, which needs `YOLO_TEST_IMAGE`), `ruff` clean,
+`pip check` clean.
+
+- **Mocked tests** prove the HTTP contract: readiness semantics (ready **and** not-ready),
+  JSON structure, exact coordinate/class mapping, zero-detection success, all error paths
+  (400/413/415/429/503/500), model-initialized-once, explicit `device="cpu"` on every call,
+  sanitized internal errors, static asset serving.
+- **Live-model tests** (`-m live`) prove the real checkpoint works through the real HTTP stack:
+  readiness with real versions, a 200 on a synthetic image (empty detections = valid success),
+  and — when `YOLO_TEST_IMAGE` points at a legally usable photo — bounded, in-image detection
+  boxes with actual timings.
+- A mocked detector is **not** proof that the real model works, and a Python inference call is
+  **not** proof that the HTTP service works — both layers are tested separately, and the live
+  curl session in the agent report covers the uninstrumented HTTP path as well.
+- **Browser tests** (`tests/test_browser.py`) drive the real application over HTTP with a real
+  headless Chromium via Playwright: landscape/portrait upload with
+  `getBoundingClientRect()` geometry checks (image vs canvas vs frame), viewport resizing,
+  narrow viewport, zero-detection state, multi-detection labels/timing, unsupported and
+  oversized file rejection (previous annotations cleared, rejected file never submitted,
+  loading indicator cleared), rejection while a detection is still in flight (F-003:
+  pending request cancelled, loading cleared, no stale results, recovery — for both
+  unsupported and oversized files), request cancellation + stale-response discard
+  (delayed response can never annotate a newer image), recovery after rejection, and
+  repeated interactions.
+  Setup once: `python -m pip install -r requirements-dev.txt` and
+  `python -m playwright install --with-deps chromium`. The suite reuses a running service on
+  `127.0.0.1:8000` (or starts one) and skips end-to-end detection tests when the official
+  weights are not present. Screenshots land in `artifacts/browser/` (git-ignored) and are not
+  committed. No private or unlicensed photographs are committed; the demo works with any
+  user-selected local image.
+
+## Known limitations
+
+- **No webcam / video-file input yet** (deferred work orders); the demo is image-upload only.
+- Loopback-only by default; no LAN exposure (requires explicit approval + real remote test).
+- Unauthenticated single-process demo; **not** suitable for public Internet deployment.
+- COCO general-object detection only — no industrial inspection precision, no counting
+  guarantees, no absence-of-object guarantees.
+- First start needs Internet for the one-time checkpoint download (offline path documented).
+
+## Troubleshooting
+
+See the full recovery table in [`docs/demo-runbook.md`](docs/demo-runbook.md) §6. Quick hits:
+
+- `/health` returns 503 → model not loaded; check the server log (usually a failed weights
+  download; pre-stage weights for offline demos, runbook §5).
+- `413 image_too_large` → image exceeds 8 MiB compressed or 24 MP decoded; resize/compress.
+- `429 inference_overloaded` → another request is mid-inference (concurrency 1); wait ~1 s.
+- Port busy → `PORT=8010 python -m backend.main`.
+- `torchvision::nms does not exist` → torchvision/torch wheel mismatch; reinstall torchvision
+  from the CPU index (runbook §6).
 
 ## Development model (OAP)
 
@@ -295,51 +403,9 @@ This repository is governed by the Orchestrated Agentic Programming (OAP) model 
 | **Execution agent** (e.g. Codex CLI) | Bounded implementation in the approved workspace, tests, commits, PRs, evidence reports |
 
 Rules that bind every contribution: one bounded branch per work order from an agreed base
-(`docs/readme`, `feat/cpu-inference`, …), no direct commits to `main`, no self-merge, tests and
-docs updated in the same change as behavior, and every claim of performance/CPU operation
-backed by actual measurement. Significant approved decisions get a short ADR in `docs/adr/`.
-
-## Getting started
-
-> **Greenfield notice:** there is no runnable code in this repository yet. The workflow below is
-> *planned* and will be verified and corrected by the implementation work order that lands
-> `requirements.txt` and `backend/`. Do not treat these commands as tested.
-
-Planned workflow (Ubuntu / WSL2):
-
-```bash
-git clone https://github.com/david-bernes/delavnica
-cd delavnica
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt        # added with P0 implementation
-# First start downloads pretrained weights from the official Ultralytics source (Internet needed once)
-uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-Planned checks:
-
-```bash
-curl -s http://127.0.0.1:8000/health
-curl -s -F "file=@sample.jpg" http://127.0.0.1:8000/detect
-# Open http://127.0.0.1:8000/ in a browser for the interactive demo
-# Stop the service: Ctrl+C (single Uvicorn worker, no state to clean up)
-```
-
-A full step-by-step `docs/demo-runbook.md` (start, image test, webcam test, curl, stop, common
-failure recovery) is part of the P0 deliverables.
-
-## Testing & verification approach
-
-- **Unit/API tests** (mocked inference, fast, offline): config validation incl. GPU-rejection,
-  image validation boundaries, result-schema/geometry contract, error paths, no-persistence.
-- **Live-model CPU integration** (opt-in marker, needs official weights): real pretrained
-  checkpoint, `device="cpu"`, real HTTP endpoint, known test image; a mocked test is explicitly
-  *not* proof of real CPU inference.
-- **Browser smoke**: upload/overlay, image switching, no-detection case, permission errors,
-  Start/Stop, single in-flight frame, stale-response rejection — manual portions labeled as such.
-- **Quality gates** per change: `pytest`, `ruff check`, `python -m compileall`, `pip check`,
-  Uvicorn launch + `curl` smoke.
+(`main`), no direct commits to `main`, no self-merge, tests and docs updated in the same change
+as behavior, and every claim of performance/CPU operation backed by actual measurement.
+Significant approved decisions get a short ADR in `docs/adr/`.
 
 ## License
 

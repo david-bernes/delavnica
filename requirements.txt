@@ -1,0 +1,15 @@
+# Runtime dependencies — versions verified on Python 3.14 / Ubuntu 26.04 (WSL2).
+#
+# CPU-ONLY note: on a machine without a GPU, install the CPU builds of
+# torch/torchvision FIRST from the official PyTorch CPU wheel index
+# (see README "Setup"); the pins below are satisfied by the +cpu wheels
+# (PEP 440: 2.14.0+cpu satisfies torch==2.14.0), which prevents pip from
+# pulling the CUDA-enabled wheels from PyPI.
+torch==2.14.0
+torchvision==0.29.0
+ultralytics==8.4.157
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pillow==12.3.0
+python-dotenv==1.2.3
+python-multipart==0.0.22

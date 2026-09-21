@@ -6,7 +6,10 @@
 //  - at most one outstanding /detect request (new image aborts the old one);
 //  - stale responses (replaced image / aborted fetch) are ignored;
 //  - old boxes are cleared immediately when the image changes;
-//  - overlays are scaled from API image pixels to displayed CSS pixels.
+//  - overlays are scaled from API image pixels to displayed CSS pixels;
+//  - invalidating an in-flight request always clears its loading state (F-003);
+//  - rejected files are cleared from the input so the Detect button can
+//    never submit them (F-003).
 
 const API = {
   health: "/health",
@@ -48,6 +51,7 @@ function colorFor(name) {
 let seq = 0;                 // request/image generation counter
 let controller = null;       // AbortController of the in-flight request
 let lastResult = null;       // {detections, image} for redraw on resize
+let serviceReady = false;    // last readiness state reported by /health
 
 // ---------------------------------------------------------------- status
 
@@ -57,6 +61,7 @@ function setStatus(text, kind) {
 }
 
 function setServiceEnabled(enabled) {
+  serviceReady = enabled;
   els.detect.disabled = !enabled;
 }
 
@@ -117,12 +122,21 @@ function showPreview(file) {
 
 // ---------------------------------------------------------------- detect
 
+// F-003: a request whose seq was invalidated will never run its own
+// cleanup (its finally block is seq-guarded), so the UI state it owns —
+// the loading indicator and the Detect button — is released here.
+function stopLoading() {
+  els.loading.classList.add("hidden");
+  setServiceEnabled(serviceReady);
+}
+
 function invalidateCurrent() {
   seq += 1;
   if (controller) {
     controller.abort();
     controller = null;
   }
+  stopLoading();
   clearOverlay();
   lastResult = null;
   els.results.classList.add("hidden");
@@ -161,6 +175,7 @@ async function runDetection() {
       showError(msg);
       return;
     }
+    setServiceEnabled(true); // a 200 proves the model is actually ready
     lastResult = data;
     drawOverlay(data.detections, data.image);
     showResults(data);
@@ -169,10 +184,7 @@ async function runDetection() {
     if (err && err.name === "AbortError") return;
     showError("Could not reach the detection service.");
   } finally {
-    if (mySeq === seq) {
-      els.loading.classList.add("hidden");
-      setServiceEnabled(true);
-    }
+    if (mySeq === seq) stopLoading();
   }
 }
 
@@ -289,16 +301,25 @@ els.file.addEventListener("change", () => {
   // newly selected image).
   invalidateCurrent();
   if (!/^image\/(jpeg|png)$/.test(file.type)) {
-    showError("Please choose a JPEG or PNG image file.");
+    rejectFile("Please choose a JPEG or PNG image file.");
     return;
   }
   if (file.size > MAX_UPLOAD_BYTES) {
-    showError("The selected file is larger than the 8 MiB upload limit.");
+    rejectFile("The selected file is larger than the 8 MiB upload limit.");
     return;
   }
   showPreview(file);
   runDetection();
 });
+
+// F-003: report the rejection and clear the file from the input. The
+// previous image's preview stays on screen, but the Detect button reads
+// els.file.files[0], which is now empty, so a rejected file can never be
+// submitted over the previous image.
+function rejectFile(message) {
+  showError(message);
+  els.file.value = "";
+}
 
 els.detect.addEventListener("click", () => {
   if (els.frame.classList.contains("hidden")) return;
